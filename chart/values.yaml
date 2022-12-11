@@ -1,0 +1,202 @@
+forceRedeploy: true
+
+configMaps:
+  -
+    name: plugins-config
+    data:
+      enabled_plugins: |-
+        [rabbitmq_management].
+
+statefulSet:
+  serviceName: service
+  serviceAccountName: service-account
+  replicas: 1
+  containers:
+    -
+      name: rabbitmq
+      image:
+        repository: rabbitmq
+        tag: 3-management-alpine
+      lifecycle:
+        postStart:
+          exec:
+            # This is needed because rabbitmq.conf does not set the password correctly if it contains special characters
+            command: ["/bin/sh", "-c", "sleep 70;rabbitmqctl change_password $RabbitMQUsername $RabbitMQPassword --erlang-cookie UAjcFQcBKHiVj55"]
+      ports:
+        -
+          name: ampq
+          containerPort: 5672
+        -
+          name: stats
+          containerPort: 15672
+      resources:
+        requests:
+          cpu: 200m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      env:
+        - name: K8S_SERVICE_NAME
+          value: service
+        - name: K8S_ADDRESS_TYPE
+          value: hostname
+        - name: RABBITMQ_FORCE_BOOT
+          value: "false"
+        - name: RABBITMQ_NODE_NAME
+          value: "rabbit@$(MY_POD_NAME).$(K8S_SERVICE_NAME).$(MY_POD_NAMESPACE).svc.cluster.local"
+        - name: K8S_HOSTNAME_SUFFIX
+          value: ".$(K8S_SERVICE_NAME).$(MY_POD_NAMESPACE).svc.cluster.local"
+        - name: RABBITMQ_MNESIA_DIR
+          value: "/var/lib/rabbitmq/mnesia/$(RABBITMQ_NODE_NAME)"
+        - name: RABBITMQ_LDAP_ENABLE
+          value: "no"
+        - name: RABBITMQ_LOGS
+          value: "-"
+        - name: RABBITMQ_ULIMIT_NOFILES
+          value: "65536"
+        - name: RABBITMQ_USE_LONGNAME
+          value: "true"
+        - name: RABBITMQ_SECURE_PASSWORD
+          value: "no"
+        - name: RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS
+          value: -setcookie $(CUSTOM_ERLANG_COOKIE)
+      envFromSecret:
+        -
+          secretName: auth-secret
+          envs:
+            - name: CUSTOM_ERLANG_COOKIE
+              key: rabbitmq-erlang-cookie
+      envFromFieldRef:
+        -
+          name: MY_POD_NAMESPACE
+          fieldPath: metadata.namespace
+        -
+          name: MY_POD_NAME
+          fieldPath: metadata.name
+        -
+          name: MY_POD_IP
+          fieldPath: status.podIP
+      volumeMounts:
+        -  
+          name: configuration
+          mountPath: /etc/rabbitmq
+        -
+          name: storage
+          mountPath: /var/lib/rabbitmq/mnesia
+          subPath: rabbitmq
+  volumes:
+    - 
+      name: configuration
+      projected:
+        -
+          type: secret
+          typeName: config-secret
+        -
+          type: configMap
+          typeName: plugins-config
+    -
+      name: storage
+      type: pvc
+      typeName: storage-pvc
+
+ingress:
+  name: ingress
+  hosts:
+    -
+      host: rabbitmq.pricegrabber.xyz
+      paths:
+        -
+          path: "/"
+          pathType: Prefix
+          serviceName: service
+          servicePort: stats
+  tls:
+    secretName: tls-secret
+
+pvcs:
+  -
+    name: storage-pvc
+    storageClassName: local-path
+    accessModes:
+      - ReadWriteMany
+    size: 1Gi
+    volumeMode: Filesystem
+
+role:
+  name: role
+  rules:
+    - apiGroups: [ "" ]
+      resources: [ "endpoints" ]
+      verbs: [ "get" ]
+    - apiGroups: [ "" ]
+      resources: [ "events" ]
+      verbs: [ "create" ]
+
+roleBinding:
+  name: role-binding
+  roleName: role
+  serviceAccountName: service-account
+
+secrets:
+  -
+    name: tls-secret
+    type: kubernetes.io/tls
+    data:
+      tls.crt: b64:$TlsCrt
+      tls.key: b64:$TlsKey
+  -
+    name: auth-secret
+    type: Opaque
+    data:
+      rabbitmq-password: $RabbitMQPassword
+      rabbitmq-erlang-cookie: UAjcFQcBKHiVj55
+  -
+    name: config-secret
+    type: Opaque
+    data:
+      rabbitmq.conf: |-
+        # Ports
+        listeners.tcp.default = 5672
+        ## Username and password
+        ##
+        default_user = $RabbitMQUsername
+        default_pass = $RabbitMQPassword
+        ## Clustering
+        ##
+        cluster_formation.peer_discovery_backend  = rabbit_peer_discovery_k8s
+        cluster_formation.k8s.host = kubernetes.default.svc.cluster.local
+        cluster_formation.node_cleanup.interval = 10
+        cluster_formation.node_cleanup.only_log_warning = true
+        cluster_partition_handling = autoheal
+        # queue master locator
+        queue_master_locator = min-masters
+        # enable guest user
+        loopback_users.guest = false
+        ## Prometheus metrics
+        ##
+        # prometheus.tcp.port = 9419
+        ## Memory Threshold
+        ## 134217728 bytes = 128Mi
+        # total_memory_available_override_value = 134217728
+        # 0.9 = 90%
+        vm_memory_high_watermark.relative = 0.9
+
+serviceAccount:
+  name: service-account
+  automountServiceAccountToken: true
+  secretName: service-account-token
+
+services:
+  -
+    name: service
+    type: ClusterIP
+    ports:
+      -
+        name: ampq
+        protocol: TCP
+        port: 5672
+      -
+        name: stats
+        protocol: TCP
+        port: 15672
