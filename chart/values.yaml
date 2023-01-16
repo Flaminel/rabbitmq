@@ -104,7 +104,7 @@ ingress:
   name: ingress
   hosts:
     -
-      host: rabbitmq.pricegrabber.xyz
+      host: rabbitmq.mariusne.com
       paths:
         -
           path: "/"
