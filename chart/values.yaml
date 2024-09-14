@@ -1,8 +1,7 @@
 forceRedeploy: true
 
 configMaps:
-  -
-    name: plugins-config
+  - name: plugins-config
     data:
       enabled_plugins: |-
         [rabbitmq_management].
@@ -12,30 +11,44 @@ statefulSet:
   serviceAccountName: service-account
   replicas: 1
   containers:
-    -
-      name: rabbitmq
+    - name: rabbitmq
       image:
         repository: rabbitmq
         tag: 3-management-alpine
       lifecycle:
         postStart:
           exec:
-            # This is needed because rabbitmq.conf does not set the password correctly if it contains special characters
-            command: ["/bin/sh", "-c", "sleep 70;rabbitmqctl change_password $RabbitMQUsername $RabbitMQPassword --erlang-cookie UAjcFQcBKHiVj55"]
+            command: ["/bin/sh", "-c", '
+              echo "Waiting for RabbitMQ to start...";
+              while ! rabbitmqctl status --erlang-cookie $CUSTOM_ERLANG_COOKIE > /dev/null 2>&1; do
+                echo "RabbitMQ not ready, waiting...";
+                sleep 5;
+              done;
+              echo "RabbitMQ is ready.";
+
+              existing_password=$(rabbitmqctl authenticate_user $RABBITMQ_DEFAULT_USER $RABBITMQ_PASS --erlang-cookie $CUSTOM_ERLANG_COOKIE 2>&1);
+              if echo "$existing_password" | grep -q "authenticated successfully"; then
+                echo "Password already set, skipping password change.";
+              else
+                echo "Changing password...";
+                rabbitmqctl change_password $RABBITMQ_DEFAULT_USER $RABBITMQ_PASS --erlang-cookie $CUSTOM_ERLANG_COOKIE;
+              fi']
       ports:
-        -
-          name: ampq
+        - name: tcp
           containerPort: 5672
-        -
-          name: stats
+          protocol: TCP
+        - name: udp
+          containerPort: 5672
+          protocol: UDP
+        - name: stats
           containerPort: 15672
       resources:
         requests:
-          cpu: 200m
-          memory: 128Mi
+          cpu: 0m
+          memory: 0Mi
         limits:
-          cpu: 500m
-          memory: 256Mi
+          cpu: 1000m
+          memory: 512Mi
       env:
         - name: K8S_SERVICE_NAME
           value: service
@@ -62,52 +75,57 @@ statefulSet:
         - name: RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS
           value: -setcookie $(CUSTOM_ERLANG_COOKIE)
       envFromSecret:
-        -
-          secretName: auth-secret
+        - secretName: rabbitmq-secret
           envs:
+            - name: RABBITMQ_DEFAULT_USER
+              key: USERNAME
+            - name: RABBITMQ_PASS
+              key: PASSWORD
+            - name: RABBITMQ_DEFAULT_PASS
+              key: DEFAULT_PASSWORD
             - name: CUSTOM_ERLANG_COOKIE
-              key: rabbitmq-erlang-cookie
+              key: ERLANG_COOKIE
       envFromFieldRef:
-        -
-          name: MY_POD_NAMESPACE
+        - name: MY_POD_NAMESPACE
           fieldPath: metadata.namespace
-        -
-          name: MY_POD_NAME
+        - name: MY_POD_NAME
           fieldPath: metadata.name
-        -
-          name: MY_POD_IP
+        - name: MY_POD_IP
           fieldPath: status.podIP
       volumeMounts:
-        -  
-          name: configuration
+        - name: configuration
           mountPath: /etc/rabbitmq
-        -
-          name: storage
+        - name: storage
           mountPath: /var/lib/rabbitmq/mnesia
           subPath: rabbitmq
   volumes:
-    - 
-      name: configuration
+    - name: configuration
       projected:
-        -
-          type: secret
+        - type: secret
           typeName: config-secret
-        -
-          type: configMap
+        - type: configMap
           typeName: plugins-config
-    -
-      name: storage
+    - name: storage
       type: pvc
       typeName: storage-pvc
+
+infisicalSecrets:
+  - name: infisical-rabbitmq-secret
+    serviceTokenSecretName: service-token
+    secretsPath: /rabbitmq
+    secretName: rabbitmq-secret
+  - name: infisical-certificates
+    serviceTokenSecretName: service-token
+    secretsPath: /certificates
+    secretName: tls-secret
+    secretType: kubernetes.io/tls
 
 ingress:
   name: ingress
   hosts:
-    -
-      host: rabbitmq.mariusne.com
+    - host: rmq.mariusne.com
       paths:
-        -
-          path: "/"
+        - path: "/"
           pathType: Prefix
           serviceName: service
           servicePort: stats
@@ -115,53 +133,20 @@ ingress:
     secretName: tls-secret
 
 pvcs:
-  -
-    name: storage-pvc
-    storageClassName: local-path
+  - name: storage-pvc
+    storageClassName: local-path-persistent
     accessModes:
-      - ReadWriteMany
+      - ReadWriteOnce
     size: 1Gi
     volumeMode: Filesystem
 
-role:
-  name: role
-  rules:
-    - apiGroups: [ "" ]
-      resources: [ "endpoints" ]
-      verbs: [ "get" ]
-    - apiGroups: [ "" ]
-      resources: [ "events" ]
-      verbs: [ "create" ]
-
-roleBinding:
-  name: role-binding
-  roleName: role
-  serviceAccountName: service-account
-
 secrets:
-  -
-    name: tls-secret
-    type: kubernetes.io/tls
-    data:
-      tls.crt: b64:$TlsCrt
-      tls.key: b64:$TlsKey
-  -
-    name: auth-secret
-    type: Opaque
-    data:
-      rabbitmq-password: $RabbitMQPassword
-      rabbitmq-erlang-cookie: UAjcFQcBKHiVj55
-  -
-    name: config-secret
+  - name: config-secret
     type: Opaque
     data:
       rabbitmq.conf: |-
         # Ports
         listeners.tcp.default = 5672
-        ## Username and password
-        ##
-        default_user = $RabbitMQUsername
-        default_pass = $RabbitMQPassword
         ## Clustering
         ##
         cluster_formation.peer_discovery_backend  = rabbit_peer_discovery_k8s
@@ -188,15 +173,17 @@ serviceAccount:
   secretName: service-account-token
 
 services:
-  -
-    name: service
+  - name: service
     type: ClusterIP
     ports:
-      -
-        name: ampq
+      - name: tcp
         protocol: TCP
         port: 5672
-      -
-        name: stats
+        targetPort: tcp
+      - name: udp
+        protocol: UDP
+        port: 5672
+        targetPort: udp
+      - name: stats
         protocol: TCP
         port: 15672
