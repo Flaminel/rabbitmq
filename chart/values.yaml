@@ -109,28 +109,17 @@ statefulSet:
       type: pvc
       typeName: storage-pvc
 
-infisicalSecrets:
-  - name: infisical-rabbitmq-secret
-    serviceTokenSecretName: service-token
-    secretsPath: /rabbitmq
-    secretName: rabbitmq-secret
-  - name: infisical-certificates
-    serviceTokenSecretName: service-token
-    secretsPath: /certificates
-    secretName: tls-secret
-    secretType: kubernetes.io/tls
-
 ingress:
   name: ingress
+  tls:
+    secretName: tls-secret
   hosts:
-    - host: rmq.mariusne.com
+    - host: rmq.@vault(secrets/data/domain main | DOMAIN_NAME)
       paths:
         - path: "/"
           pathType: Prefix
           serviceName: service
           servicePort: stats
-  tls:
-    secretName: tls-secret
 
 pvcs:
   - name: storage-pvc
@@ -187,3 +176,18 @@ services:
       - name: stats
         protocol: TCP
         port: 15672
+
+vaultSecrets:
+  - name: tls-secret
+    type: kubernetes.io/tls
+    path: secrets/certificates
+    templates:
+      tls.crt: "{% .Secrets.tls_crt %}"
+      tls.key: "{% .Secrets.tls_key %}" 
+  - name: rabbitmq-secret
+    path: secrets/rabbitmq
+    templates:
+      DEFAULT_PASSWORD: "{% .Secrets.default_password %}"
+      ERLANG_COOKIE: "{% .Secrets.erlang_cookie %}"
+      PASSWORD: "{% .Secrets.password %}"
+      USERNAME: "{% .Secrets.username %}"
